@@ -5,6 +5,7 @@ buildscript {
 
     dependencies {
         classpath 'com.bmuschko:gradle-tomcat-plugin:2.2.2'
+	classpath 'org.hidetake:gradle-ssh-plugin:0.4.5'
     }
 }
 
@@ -40,4 +41,196 @@ dependencies {
 
 tomcat {
     contextPath = 'sample-app'
+    //httpPort = 9090
+}
+
+//lab 5: Init test report
+test {
+    reports {
+        html.destination = file("$html.destination/unit")
+        junitXml.destination = file("$junitXml.destination/unit")
+    }
+    
+    maxParallelForks = 2
+    
+    testLogging {
+        events 'skipped'
+    }
+}
+
+// lab 6: Integration tests
+sourceSets {
+    integrationTest {
+        java.srcDir file('src/integTest/java')
+        resources.srcDir file('src/integTest/resources')
+        compileClasspath += sourceSets.main.output + configurations.testRuntime
+        runtimeClasspath += output + compileClasspath
+    }
+}
+
+task integrationTest(type: Test) {
+    mustRunAfter test
+    testClassesDir = sourceSets.integrationTest.output.classesDir
+    classpath = sourceSets.integrationTest.runtimeClasspath
+
+    reports {
+        html.destination = file("$html.destination/integration")
+        junitXml.destination = file("$junitXml.destination/integration")
+    }
+}
+
+check.dependsOn integrationTest
+
+dependencies {
+	integrationTestCompile 'org.springframework:spring-test:4.1.1.RELEASE'
+}
+
+// lab 7 Static Analyses
+apply plugin: 'findbugs'
+
+findbugs {
+    ignoreFailures = true
+}
+
+tasks.withType(FindBugs) {
+    reports {
+        xml.enabled = false
+        html.enabled = true
+    }
+}
+
+// lab 8 - Coverage
+apply plugin: 'jacoco'
+
+tasks.withType(Test) {
+    jacoco {
+        enabled = project.hasProperty('codeCoverageEnabled') ? Boolean.valueOf(project.getProperty('codeCoverageEnabled')) : false
+    }
+}
+
+ext {
+    jacocoReportsBaseDir = file("$buildDir/reports/jacoco")
+    jacocoReportsExecDir = file("$jacocoReportsBaseDir/exec")
+    jacocoReportsHtmlDir = file("$jacocoReportsBaseDir/html")
+}
+
+test.jacoco.destinationFile = file("$jacocoReportsExecDir/unit.exec")
+integrationTest.jacoco.destinationFile = file("$jacocoReportsExecDir/integration.exec")
+
+jacocoTestReport {
+    reports {
+        html.destination file("$jacocoReportsHtmlDir/unit")
+    }
+}
+
+task jacocoIntegrationTestReport(type: JacocoReport) {
+    executionData integrationTest
+    sourceSets sourceSets.main
+
+    reports {
+        html.destination file("$jacocoReportsHtmlDir/integration")
+    }
+}
+
+
+// lab 9: Namming the application artifact
+//war.baseName = 'myapp'
+
+// lab 10: Version
+//version = new ProjectVersion(1, 2, new Date().time.toString())
+
+task printVersion {
+    doLast {
+        println "Project version: $project.version"
+    }
+}
+
+import groovy.transform.TupleConstructor
+
+@TupleConstructor
+class ProjectVersion {
+    final Integer major
+    final Integer minor
+    final String build
+
+    @Override
+    String toString() {
+        String fullVersion = "$major.$minor"
+
+        if(build) {
+            fullVersion += ".$build"
+        }
+
+        fullVersion
+    }
+}
+
+// lab 11: deploy
+apply plugin: 'maven'
+
+uploadArchives {
+    repositories {
+        mavenDeployer {
+            repository(url: "file://${buildDir}/repo/")
+            pom.project {
+                description "Training sample application"
+            }
+        }
+    }
+}
+
+// lab 12: deploy to tomcat container
+
+//dependencies {
+//        classpath 'org.hidetake:gradle-ssh-plugin:0.4.5'
+//}
+
+apply plugin: org.hidetake.gradle.ssh.plugin.SshPlugin
+
+remotes {
+    vagrant {
+        host = '192.168.1.33'
+        user = 'vagrant'
+        //identity = file("${System.properties['user.home']}/.vagrant/machines/tomcat/virtualbox/private_key")
+	identity = file("vagrant/.vagrant/machines/tomcat/virtualbox/private_key")
+			 
+    }
+}
+
+task deploy {
+    description = 'Deploys application to target environment.'
+    
+    doLast {
+        def remoteForEnv = getRemoteForEnviroment()
+        Task warTask = project.tasks.getByName('war')
+        File webAppArtifactPath = warTask.archivePath
+        String webAppArtifactName = warTask.archiveName
+                
+        ssh.run {
+            session(remoteForEnv) {
+                execute 'sudo service tomcat7 stop'
+                put webAppArtifactPath, '/tmp'
+                execute "sudo mv /tmp/$webAppArtifactName /tmp/sample-app.war"
+                execute "sudo rm -rf /var/lib/tomcat7/webapps/sample-app"
+                execute "sudo mv /tmp/sample-app.war /var/lib/tomcat7/webapps"
+                execute 'sudo service tomcat7 start'
+            }
+        }
+    }
+}
+
+def getRemoteForEnviroment() {
+    def env = project.hasProperty('env') ? project.getProperty('env') : 'local'
+    
+    if(env == 'local') {
+        // Allow any host for local development
+        ssh.settings {
+            knownHosts = allowAnyHosts
+        }
+        
+        return remotes.vagrant        
+    }
+    else {
+        throw new GradleException("Unsupported deployment environent: '$env'")
+    }
 }
